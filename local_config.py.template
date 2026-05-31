@@ -5,17 +5,43 @@ ERPNEXT_API_SECRET = ''
 ERPNEXT_URL = 'http://dev.local:8000'
 ERPNEXT_VERSION = 13
 
-# Optional endpoint overrides. Leave as None to use the standard ERPNext paths
-# derived from ERPNEXT_URL and ERPNEXT_VERSION above.
-#   ERPNEXT_CHECKIN_URL: full URL to POST punch logs to.
-#     Default: <ERPNEXT_URL>/api/method/{hrms|erpnext}.hr.doctype.employee_checkin
-#              .employee_checkin.add_log_based_on_employee_field
-#   ERPNEXT_SHIFT_TYPE_URL: full URL to PUT shift sync timestamps to. Use the
-#     literal '{shift_type}' placeholder where the shift name should be substituted.
-#     If the placeholder is omitted, the shift name is appended as a path segment.
-#     Default: <ERPNEXT_URL>/api/resource/Shift Type/{shift_type}
+# ---------------------------------------------------------------------------
+# Optional: override the destination URLs entirely.
+#
+# Leave both keys as None to use the standard ERPNext paths built from
+# ERPNEXT_URL + ERPNEXT_VERSION above. Set either key to a full URL to send
+# requests somewhere else (a reverse proxy, a custom Frappe method, a
+# different host, a non-ERPNext receiver, etc.). The auth header
+# (token <KEY>:<SECRET>) is still sent, so whatever you point at must accept
+# it or you must put a translating proxy in between.
+#
+# ERPNEXT_CHECKIN_URL — full URL the punch-log POST is sent to.
+#   Resolved default for ERPNEXT_VERSION >= 14:
+#     <ERPNEXT_URL>/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field
+#   Resolved default for ERPNEXT_VERSION <= 13:
+#     <ERPNEXT_URL>/api/method/erpnext.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field
+#   POST body: {employee_field_value, timestamp, device_id, log_type, latitude, longitude}
+#
+# Examples (uncomment ONE to override):
+# ERPNEXT_CHECKIN_URL = 'https://hr.acme.com/api/method/hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field'
+# ERPNEXT_CHECKIN_URL = 'https://attendance-proxy.acme.com/punches'
+# ERPNEXT_CHECKIN_URL = 'https://hr.acme.com/api/method/my_custom_app.api.record_checkin'
 ERPNEXT_CHECKIN_URL = None
+#
+# ERPNEXT_SHIFT_TYPE_URL — full URL the shift-sync PUT is sent to.
+#   Use the literal '{shift_type}' placeholder where the shift name should
+#   appear; the script URL-encodes the name before substituting. If you
+#   omit the placeholder, the shift name is appended as a path segment.
+#   Resolved default:
+#     <ERPNEXT_URL>/api/resource/Shift Type/{shift_type}
+#   PUT body: {"last_sync_of_checkin": "<timestamp>"}
+#
+# Examples (uncomment ONE to override):
+# ERPNEXT_SHIFT_TYPE_URL = 'https://hr.acme.com/api/resource/Shift Type/{shift_type}'
+# ERPNEXT_SHIFT_TYPE_URL = 'https://attendance-proxy.acme.com/shifts/{shift_type}/last-sync'
+# ERPNEXT_SHIFT_TYPE_URL = 'https://attendance-proxy.acme.com/shifts'   # name appended automatically
 ERPNEXT_SHIFT_TYPE_URL = None
+# ---------------------------------------------------------------------------
 
 
 # operational configs
