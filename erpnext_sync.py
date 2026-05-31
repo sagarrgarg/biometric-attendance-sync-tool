@@ -16,15 +16,31 @@ EMPLOYEE_INACTIVE_ERROR_MESSAGE = "Transactions cannot be created for an Inactiv
 DUPLICATE_EMPLOYEE_CHECKIN_ERROR_MESSAGE = "This employee already has a log with the same timestamp"
 allowlisted_errors = [EMPLOYEE_NOT_FOUND_ERROR_MESSAGE, EMPLOYEE_INACTIVE_ERROR_MESSAGE, DUPLICATE_EMPLOYEE_CHECKIN_ERROR_MESSAGE]
 
-if hasattr(config,'allowed_exceptions'):
+if hasattr(config, 'allowed_exceptions'):
     allowlisted_errors_temp = []
     for error_number in config.allowed_exceptions:
-        allowlisted_errors_temp.append(allowlisted_errors[error_number-1])
+        if 1 <= error_number <= len(allowlisted_errors):
+            allowlisted_errors_temp.append(allowlisted_errors[error_number - 1])
     allowlisted_errors = allowlisted_errors_temp
 
 device_punch_values_IN = getattr(config, 'device_punch_values_IN', [0,4])
 device_punch_values_OUT = getattr(config, 'device_punch_values_OUT', [1,5])
 ERPNEXT_VERSION = getattr(config, 'ERPNEXT_VERSION', 14)
+
+def _default_checkin_url():
+    endpoint_app = "hrms" if ERPNEXT_VERSION > 13 else "erpnext"
+    return f"{config.ERPNEXT_URL}/api/method/{endpoint_app}.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
+
+def _default_shift_type_url():
+    # {shift_type} is URL-quoted at call time
+    return f"{config.ERPNEXT_URL}/api/resource/Shift Type/{{shift_type}}"
+
+# Endpoint overrides (optional). If unset, fall back to the standard ERPNext paths above.
+#   ERPNEXT_CHECKIN_URL: full URL to POST punch logs to.
+#   ERPNEXT_SHIFT_TYPE_URL: full URL to PUT shift sync timestamps to. Use the literal
+#     '{shift_type}' placeholder where the shift name should be substituted.
+ERPNEXT_CHECKIN_URL = getattr(config, 'ERPNEXT_CHECKIN_URL', None) or _default_checkin_url()
+ERPNEXT_SHIFT_TYPE_URL = getattr(config, 'ERPNEXT_SHIFT_TYPE_URL', None) or _default_shift_type_url()
 
 # possible area of further developemt
     # Real-time events - setup getting events pushed from the machine rather then polling.
@@ -44,35 +60,49 @@ def main():
 
     """
     try:
+        now = datetime.datetime.now()
         last_lift_off_timestamp = _safe_convert_date(status.get('lift_off_timestamp'), "%Y-%m-%d %H:%M:%S.%f")
-        if (last_lift_off_timestamp and last_lift_off_timestamp < datetime.datetime.now() - datetime.timedelta(minutes=config.PULL_FREQUENCY)) or not last_lift_off_timestamp:
-            status.set('lift_off_timestamp', str(datetime.datetime.now()))
+        # Treat a timestamp in the future (clock skew / corrupted value) as if it were missing,
+        # otherwise the gating condition stays False forever and the script silently never runs.
+        if last_lift_off_timestamp and last_lift_off_timestamp > now:
+            info_logger.warning(f'lift_off_timestamp {last_lift_off_timestamp} is in the future; ignoring it')
+            last_lift_off_timestamp = None
+        if (last_lift_off_timestamp and last_lift_off_timestamp < now - datetime.timedelta(minutes=config.PULL_FREQUENCY)) or not last_lift_off_timestamp:
+            status.set('lift_off_timestamp', str(now))
             status.save()
             info_logger.info("Cleared for lift off!")
-            for device in config.devices:
-                device_attendance_logs = None
-                info_logger.info("Processing Device: "+ device['device_id'])
-                dump_file = get_dump_file_name_and_directory(device['device_id'], device['ip'])
-                if os.path.exists(dump_file):
-                    info_logger.error('Device Attendance Dump Found in Log Directory. This can mean the program crashed unexpectedly. Retrying with dumped data.')
-                    with open(dump_file, 'r') as f:
-                        file_contents = f.read()
-                        if file_contents:
-                            device_attendance_logs = list(map(lambda x: _apply_function_to_key(x, 'timestamp', datetime.datetime.fromtimestamp), json.loads(file_contents)))
-                try:
-                    pull_process_and_push_data(device, device_attendance_logs)
-                    status.set(f'{device["device_id"]}_push_timestamp', str(datetime.datetime.now()))
-                    status.save()
+            try:
+                for device in config.devices:
+                    device_attendance_logs = None
+                    info_logger.info("Processing Device: "+ device['device_id'])
+                    dump_file = get_dump_file_name_and_directory(device['device_id'], device['ip'])
                     if os.path.exists(dump_file):
-                        os.remove(dump_file)
-                    info_logger.info("Successfully processed Device: "+ device['device_id'])
-                except:
-                    error_logger.exception('exception when calling pull_process_and_push_data function for device'+json.dumps(device, default=str))
-            if hasattr(config,'shift_type_device_mapping'):
-                update_shift_last_sync_timestamp(config.shift_type_device_mapping)
-            status.set('mission_accomplished_timestamp', str(datetime.datetime.now()))
-            status.save()
-            info_logger.info("Mission Accomplished!")
+                        info_logger.warning('Device Attendance Dump Found in Log Directory. This can mean the program crashed unexpectedly. Retrying with dumped data.')
+                        with open(dump_file, 'r') as f:
+                            file_contents = f.read()
+                            if file_contents:
+                                device_attendance_logs = list(map(lambda x: _apply_function_to_key(x, 'timestamp', datetime.datetime.fromtimestamp), json.loads(file_contents)))
+                    try:
+                        pull_process_and_push_data(device, device_attendance_logs)
+                        status.set(f'{device["device_id"]}_push_timestamp', str(datetime.datetime.now()))
+                        status.save()
+                        if os.path.exists(dump_file):
+                            os.remove(dump_file)
+                        info_logger.info("Successfully processed Device: "+ device['device_id'])
+                    except:
+                        error_logger.exception('exception when calling pull_process_and_push_data function for device'+json.dumps(device, default=str))
+                if hasattr(config,'shift_type_device_mapping'):
+                    update_shift_last_sync_timestamp(config.shift_type_device_mapping)
+                status.set('mission_accomplished_timestamp', str(datetime.datetime.now()))
+                status.save()
+                info_logger.info("Mission Accomplished!")
+            except:
+                # Clear lift_off so the next tick retries instead of waiting a full PULL_FREQUENCY
+                # window — the prior behavior silently locked the script out for up to 60 minutes
+                # whenever any uncaught error escaped the device loop.
+                status.set('lift_off_timestamp', None)
+                status.save()
+                raise
     except:
         error_logger.exception('exception has occurred in the main function...')
 
@@ -128,7 +158,7 @@ def pull_process_and_push_data(device, device_attendance_logs=None):
                 punch_direction = 'IN'
             else:
                 punch_direction = None
-        erpnext_status_code, erpnext_message = send_to_erpnext(device_attendance_log['user_id'], device_attendance_log['timestamp'], device['device_id'], punch_direction, latitude=device['latitude'], longitude=device['longitude'])
+        erpnext_status_code, erpnext_message = send_to_erpnext(device_attendance_log['user_id'], device_attendance_log['timestamp'], device['device_id'], punch_direction, latitude=device.get('latitude'), longitude=device.get('longitude'))
         if erpnext_status_code == 200:
             attendance_success_logger.info("\t".join([erpnext_message, str(device_attendance_log['uid']),
                 str(device_attendance_log['user_id']), str(device_attendance_log['timestamp'].timestamp()),
@@ -189,8 +219,6 @@ def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=No
     If 'Allow Geolocation Tracking' is on
     send_to_erpnext('12349',datetime.datetime.now(),'HO1','IN',latitude=12.34, longitude=56.78)
     """
-    endpoint_app = "hrms" if ERPNEXT_VERSION > 13 else "erpnext"
-    url = f"{config.ERPNEXT_URL}/api/method/{endpoint_app}.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
     headers = {
         'Authorization': "token "+ config.ERPNEXT_API_KEY + ":" + config.ERPNEXT_API_SECRET,
         'Accept': 'application/json'
@@ -203,16 +231,12 @@ def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=No
         'latitude' : latitude,
         'longitude' : longitude
     }
-    response = requests.request("POST", url, headers=headers, json=data)
+    response = requests.request("POST", ERPNEXT_CHECKIN_URL, headers=headers, json=data)
     if response.status_code == 200:
         return 200, json.loads(response._content)['message']['name']
     else:
         error_str = _safe_get_error_str(response)
-        if EMPLOYEE_NOT_FOUND_ERROR_MESSAGE in error_str:
-            error_logger.error('\t'.join(['Error during ERPNext API Call.', str(employee_field_value), str(timestamp.timestamp()), str(device_id), str(log_type), error_str]))
-            # TODO: send email?
-        else:
-            error_logger.error('\t'.join(['Error during ERPNext API Call.', str(employee_field_value), str(timestamp.timestamp()), str(device_id), str(log_type), error_str]))
+        error_logger.error('\t'.join(['Error during ERPNext API Call.', str(employee_field_value), str(timestamp.timestamp()), str(device_id), str(log_type), error_str]))
         return response.status_code, error_str
 
 def update_shift_last_sync_timestamp(shift_type_device_mapping):
@@ -248,7 +272,11 @@ def update_shift_last_sync_timestamp(shift_type_device_mapping):
                     error_logger.exception('Exception in update_shift_last_sync_timestamp, for shift:'+shift)
 
 def send_shift_sync_to_erpnext(shift_type_name, sync_timestamp):
-    url = config.ERPNEXT_URL + "/api/resource/Shift Type/" + shift_type_name
+    from urllib.parse import quote
+    if '{shift_type}' in ERPNEXT_SHIFT_TYPE_URL:
+        url = ERPNEXT_SHIFT_TYPE_URL.replace('{shift_type}', quote(shift_type_name, safe=''))
+    else:
+        url = ERPNEXT_SHIFT_TYPE_URL.rstrip('/') + '/' + quote(shift_type_name, safe='')
     headers = {
         'Authorization': "token "+ config.ERPNEXT_API_KEY + ":" + config.ERPNEXT_API_SECRET,
         'Accept': 'application/json'
@@ -331,7 +359,28 @@ if not os.path.exists(config.LOGS_DIRECTORY):
     os.makedirs(config.LOGS_DIRECTORY)
 error_logger = setup_logger('error_logger', '/'.join([config.LOGS_DIRECTORY, 'error.log']), logging.ERROR)
 info_logger = setup_logger('info_logger', '/'.join([config.LOGS_DIRECTORY, 'logs.log']))
-status = PickleDB('/'.join([config.LOGS_DIRECTORY, 'status.json']))
+
+def _open_status(path):
+    # PickleDB doesn't auto-load in __init__; load() must be called.
+    # If the file is missing, empty, or holds malformed/non-dict JSON, quarantine it
+    # and start fresh — otherwise stale or invalid state can lock the script up.
+    db = PickleDB(path)
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        try:
+            db.load()
+            if not isinstance(db.db, dict):
+                raise ValueError(f'status file root is {type(db.db).__name__}, expected dict')
+        except Exception:
+            backup = path + '.corrupt-' + datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            try:
+                os.rename(path, backup)
+                error_logger.exception(f'status file at {path} was unreadable; quarantined to {backup} and starting fresh')
+            except OSError:
+                error_logger.exception(f'status file at {path} was unreadable and could not be quarantined; starting fresh')
+            db = PickleDB(path)
+    return db
+
+status = _open_status('/'.join([config.LOGS_DIRECTORY, 'status.json']))
 
 def infinite_loop(sleep_time=15):
     print("Service Running...")

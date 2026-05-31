@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import pprint
 import shlex
 import sys
 import subprocess
@@ -14,33 +15,40 @@ from PyQt5.QtWidgets import QApplication, QLabel, QLineEdit, QMainWindow, QMessa
 
 
 config_template = '''# ERPNext related configs
-ERPNEXT_API_KEY = '{0}'
-ERPNEXT_API_SECRET = '{1}'
-ERPNEXT_URL = '{2}'
+ERPNEXT_API_KEY = '{api_key}'
+ERPNEXT_API_SECRET = '{api_secret}'
+ERPNEXT_URL = '{erpnext_url}'
+ERPNEXT_VERSION = {erpnext_version}
 
 
 # operational configs
-PULL_FREQUENCY = {3} or 60 # in minutes
+PULL_FREQUENCY = {pull_frequency} # in minutes
 LOGS_DIRECTORY = 'logs' # logs of this script is stored in this directory
-IMPORT_START_DATE = '{4}' or None # format: '20190501'
+IMPORT_START_DATE = {import_start_date} # format: '20190501'
 
-# Biometric device configs (all keys mandatory)
+# Biometric device configs (all keys mandatory, except latitude and longitude they are mandatory only if 'Allow Geolocation Tracking' is turned on in Frappe HR)
     #- device_id - must be unique, strictly alphanumerical chars only. no space allowed.
     #- ip - device IP Address
     #- punch_direction - 'IN'/'OUT'/'AUTO'/None
     #- clear_from_device_on_fetch: if set to true then attendance is deleted after fetch is successful.
     #(Caution: this feature can lead to data loss if used carelessly.)
-devices = {5}
+devices = {devices}
 
 # Configs updating sync timestamp in the Shift Type DocType
-shift_type_device_mapping = {6}
+shift_type_device_mapping = {shift_type_device_mapping}
+
+# Ignore following exceptions thrown by ERPNext and continue importing punch logs.
+#       1. No Employee found for the given employee User ID in the Biometric device.
+#       2. Employee is inactive for the given employee User ID in the Biometric device.
+#       3. Duplicate Employee Checkin found.
+allowed_exceptions = [1, 2, 3]
 '''
 
 
 class BiometricWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.reg_exp_for_ip = r"((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(?=\s*netmask)"
+        self.reg_exp_for_ip = r"^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
         self.init_ui()
 
     def closeEvent(self, event):
@@ -114,11 +122,18 @@ class BiometricWindow(QMainWindow):
             self.textbox_erpnext_url.setText(config.ERPNEXT_URL)
             self.textbox_pull_frequency.setText(str(config.PULL_FREQUENCY))
 
+            def _shift_name_for_index(idx):
+                if idx >= len(config.shift_type_device_mapping):
+                    return ''
+                name = config.shift_type_device_mapping[idx]['shift_type_name']
+                if isinstance(name, list):
+                    return name[0] if name else ''
+                return name
+
             if len(config.devices):
                 self.device_id_0.setText(config.devices[0]['device_id'])
                 self.device_ip_0.setText(config.devices[0]['ip'])
-                self.shift_0.setText(
-                    config.shift_type_device_mapping[0]['shift_type_name'])
+                self.shift_0.setText(_shift_name_for_index(0))
 
             if len(config.devices) > 1:
                 for _ in range(self.counter, len(config.devices) - 1):
@@ -130,7 +145,7 @@ class BiometricWindow(QMainWindow):
 
                     device.setText(config.devices[self.counter]['device_id'])
                     ip.setText(config.devices[self.counter]['ip'])
-                    shift.setText(config.shift_type_device_mapping[self.counter]['shift_type_name'])
+                    shift.setText(_shift_name_for_index(self.counter))
         else:
             self.textbox_erpnext_api_secret.setPlaceholderText("c70ee57c7b3124c")
             self.textbox_erpnext_api_key.setPlaceholderText("fb37y8fd4uh8ac")
@@ -257,17 +272,19 @@ class BiometricWindow(QMainWindow):
             devices.append({
                 'device_id': device_id,
                 'ip': getattr(self, "device_ip_" + str(idx)).text(),
-                'punch_direction': '',
-                'clear_from_device_on_fetch': ''
+                'punch_direction': 'AUTO',
+                'clear_from_device_on_fetch': False,
+                'latitude': 0.0,
+                'longitude': 0.0,
             })
             if shift in device:
                 device[shift].append(device_id)
             else:
-                device[shift]=[device_id]
-        
+                device[shift] = [device_id]
+
         for shift_type_name in device.keys():
             shifts.append({
-                'shift_type_name': shift_type_name,
+                'shift_type_name': [shift_type_name],
                 'related_device_id': device[shift_type_name]
             })
         return devices, shifts
@@ -278,8 +295,22 @@ class BiometricWindow(QMainWindow):
         string = self.textbox_import_start_date.text()
         formated_date = "".join([ele for ele in reversed(string.split("/"))])
 
+        pull_frequency_text = self.textbox_pull_frequency.text().strip()
+        pull_frequency = int(pull_frequency_text) if pull_frequency_text else 60
+
+        import_start_date = repr(formated_date) if formated_date else 'None'
+
         devices, shifts = self.get_device_details()
-        return config_template.format(self.textbox_erpnext_api_key.text(), self.textbox_erpnext_api_secret.text(), self.textbox_erpnext_url.text(), self.textbox_pull_frequency.text(), formated_date, json.dumps(devices), json.dumps(shifts))
+        return config_template.format(
+            api_key=self.textbox_erpnext_api_key.text(),
+            api_secret=self.textbox_erpnext_api_secret.text(),
+            erpnext_url=self.textbox_erpnext_url.text(),
+            erpnext_version=14,
+            pull_frequency=pull_frequency,
+            import_start_date=import_start_date,
+            devices=pprint.pformat(devices),
+            shift_type_device_mapping=pprint.pformat(shifts),
+        )
 
     def get_running_status(self):
         running_status = []

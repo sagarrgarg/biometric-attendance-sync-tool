@@ -5,6 +5,18 @@ ERPNEXT_API_SECRET = ''
 ERPNEXT_URL = 'http://dev.local:8000'
 ERPNEXT_VERSION = 13
 
+# Optional endpoint overrides. Leave as None to use the standard ERPNext paths
+# derived from ERPNEXT_URL and ERPNEXT_VERSION above.
+#   ERPNEXT_CHECKIN_URL: full URL to POST punch logs to.
+#     Default: <ERPNEXT_URL>/api/method/{hrms|erpnext}.hr.doctype.employee_checkin
+#              .employee_checkin.add_log_based_on_employee_field
+#   ERPNEXT_SHIFT_TYPE_URL: full URL to PUT shift sync timestamps to. Use the
+#     literal '{shift_type}' placeholder where the shift name should be substituted.
+#     If the placeholder is omitted, the shift name is appended as a path segment.
+#     Default: <ERPNEXT_URL>/api/resource/Shift Type/{shift_type}
+ERPNEXT_CHECKIN_URL = None
+ERPNEXT_SHIFT_TYPE_URL = None
+
 
 # operational configs
 PULL_FREQUENCY = 60 # in minutes
