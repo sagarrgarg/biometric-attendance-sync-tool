@@ -208,6 +208,34 @@ def get_all_attendance_from_device(ip, port=4370, timeout=30, device_id=None, cl
     return list(map(lambda x: x.__dict__, attendances))
 
 
+def wipe_device_attendance(device_id):
+    """Erase all attendance logs from the biometric device identified by
+    `device_id` in local_config.devices. Users and fingerprints are left
+    intact. Intended to be invoked from the CLI, independently of the
+    sync loop."""
+    device = next((d for d in config.devices if d['device_id'] == device_id), None)
+    if not device:
+        raise SystemExit(f"device_id {device_id!r} not found in local_config.devices")
+    ip = device['ip']
+    zk = ZK(ip, port=4370, timeout=30)
+    conn = None
+    try:
+        conn = zk.connect()
+        conn.disable_device()
+        info_logger.info("\t".join((ip, "Device Disable Attempted (wipe).")))
+        result = conn.clear_attendance()
+        info_logger.info("\t".join((ip, "Attendance Clear Attempted. Result:", str(result))))
+        conn.enable_device()
+        info_logger.info("\t".join((ip, "Device Enable Attempted (wipe).")))
+        print(f"Cleared attendance on device {device_id} ({ip}). Result: {result}")
+    except Exception:
+        error_logger.exception(f"{ip} exception when wiping device {device_id}...")
+        raise
+    finally:
+        if conn:
+            conn.disconnect()
+
+
 def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=None, latitude=None, longitude=None):
     """
     Examples: 
@@ -392,4 +420,9 @@ def infinite_loop(sleep_time=15):
             print(e)
 
 if __name__ == "__main__":
-    infinite_loop()
+    if len(sys.argv) >= 2 and sys.argv[1] == "wipe":
+        if len(sys.argv) < 3:
+            raise SystemExit("usage: python erpnext_sync.py wipe <device_id>")
+        wipe_device_attendance(sys.argv[2])
+    else:
+        infinite_loop()
