@@ -1,4 +1,4 @@
 requests
-pickledb
+pickledb>=1.0
 pyzk
 PyQt5

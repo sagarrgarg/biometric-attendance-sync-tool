@@ -390,15 +390,18 @@ error_logger = setup_logger('error_logger', '/'.join([config.LOGS_DIRECTORY, 'er
 info_logger = setup_logger('info_logger', '/'.join([config.LOGS_DIRECTORY, 'logs.log']))
 
 def _open_status(path):
-    # PickleDB doesn't auto-load in __init__; load() must be called.
-    # If the file is missing, empty, or holds malformed/non-dict JSON, quarantine it
-    # and start fresh — otherwise stale or invalid state can lock the script up.
-    db = PickleDB(path)
+    # pickledb >= 1.0 auto-loads the file in __init__ and persists via save();
+    # the old load()/db API was removed there. Validate the existing file
+    # ourselves (plain JSON read, no version-specific internals) and, if it is
+    # empty or holds malformed/non-dict JSON, quarantine it and start fresh —
+    # otherwise stale or invalid state can lock the script up or make PickleDB
+    # raise on construction.
     if os.path.exists(path) and os.path.getsize(path) > 0:
         try:
-            db.load()
-            if not isinstance(db.db, dict):
-                raise ValueError(f'status file root is {type(db.db).__name__}, expected dict')
+            with open(path, 'r') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError(f'status file root is {type(data).__name__}, expected dict')
         except Exception:
             backup = path + '.corrupt-' + datetime.datetime.now().strftime('%Y%m%d%H%M%S')
             try:
@@ -406,8 +409,7 @@ def _open_status(path):
                 error_logger.exception(f'status file at {path} was unreadable; quarantined to {backup} and starting fresh')
             except OSError:
                 error_logger.exception(f'status file at {path} was unreadable and could not be quarantined; starting fresh')
-            db = PickleDB(path)
-    return db
+    return PickleDB(path)
 
 status = _open_status('/'.join([config.LOGS_DIRECTORY, 'status.json']))
 
