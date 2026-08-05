@@ -237,6 +237,37 @@ def wipe_device_attendance(device_id):
             conn.disconnect()
 
 
+def push_dump_to_erpnext(device_id):
+    """Replay the on-disk attendance dump for `device_id` to ERPNext without
+    touching the biometric device. Useful when a dump was left behind (e.g. a
+    crash) or when you want to re-push fetched logs manually.
+
+    The dump path is derived from the device's `ip` in local_config.devices,
+    matching get_dump_file_name_and_directory(). Records are pushed through
+    pull_process_and_push_data(), so the per-device success log and
+    IMPORT_START_DATE still apply — already-synced punches are skipped, not
+    duplicated. On success the dump file is removed, mirroring the sync loop."""
+    device = next((d for d in config.devices if d['device_id'] == device_id), None)
+    if not device:
+        raise SystemExit(f"device_id {device_id!r} not found in local_config.devices")
+    dump_file = get_dump_file_name_and_directory(device['device_id'], device['ip'])
+    if not os.path.exists(dump_file):
+        raise SystemExit(f"no dump file found at {dump_file}")
+    with open(dump_file, 'r') as f:
+        file_contents = f.read()
+    if not file_contents.strip():
+        raise SystemExit(f"dump file {dump_file} is empty; nothing to push")
+    device_attendance_logs = list(map(
+        lambda x: _apply_function_to_key(x, 'timestamp', datetime.datetime.fromtimestamp),
+        json.loads(file_contents)))
+    print(f"Pushing {len(device_attendance_logs)} logs from {dump_file} for device {device_id}...")
+    pull_process_and_push_data(device, device_attendance_logs)
+    status.set(f'{device_id}_push_timestamp', str(datetime.datetime.now()))
+    status.save()
+    os.remove(dump_file)
+    print(f"Done. Pushed dump for {device_id} and removed {dump_file}.")
+
+
 def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=None, latitude=None, longitude=None):
     """
     Examples: 
@@ -427,5 +458,9 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             raise SystemExit("usage: python erpnext_sync.py wipe <device_id>")
         wipe_device_attendance(sys.argv[2])
+    elif len(sys.argv) >= 2 and sys.argv[1] == "push_dump":
+        if len(sys.argv) < 3:
+            raise SystemExit("usage: python erpnext_sync.py push_dump <device_id>")
+        push_dump_to_erpnext(sys.argv[2])
     else:
         infinite_loop()
