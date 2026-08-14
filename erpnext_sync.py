@@ -1,6 +1,8 @@
 
 import local_config as config
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import datetime
 import json
 import os
@@ -47,6 +49,23 @@ ERPNEXT_SHIFT_TYPE_URL = getattr(config, 'ERPNEXT_SHIFT_TYPE_URL', None) or _def
 # for every single punch — turning one outage into a very long hang. Override in
 # local_config with REQUEST_TIMEOUT = (connect, read) or a single number.
 REQUEST_TIMEOUT = getattr(config, 'REQUEST_TIMEOUT', (10, 30))
+
+# Reuse one keep-alive connection for all ERPNext calls instead of opening a
+# fresh TCP+TLS connection per punch. A brand-new connection per punch, fired in
+# a burst while clearing a large device backlog, can trip server-side connection
+# rate-limiting (nginx limit_conn / fail2ban / WAF), which drops this IP's SYNs
+# and surfaces as ConnectTimeout. Keep-alive keeps the new-connection rate low.
+# `connect` retries with backoff ride through a transient SYN-drop; crucially
+# only connection failures are retried (the request never reached the server),
+# so a POSTed check-in is never silently duplicated.
+_erpnext_session = requests.Session()
+_erpnext_retry = Retry(
+    total=None, connect=getattr(config, 'REQUEST_CONNECT_RETRIES', 3),
+    read=0, status=0, redirect=0, backoff_factor=1.0,
+)
+_erpnext_adapter = HTTPAdapter(max_retries=_erpnext_retry)
+_erpnext_session.mount('http://', _erpnext_adapter)
+_erpnext_session.mount('https://', _erpnext_adapter)
 
 # possible area of further developemt
     # Real-time events - setup getting events pushed from the machine rather then polling.
@@ -296,7 +315,7 @@ def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=No
         'latitude' : latitude,
         'longitude' : longitude
     }
-    response = requests.request("POST", ERPNEXT_CHECKIN_URL, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
+    response = _erpnext_session.post(ERPNEXT_CHECKIN_URL, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
     if response.status_code == 200:
         return 200, json.loads(response._content)['message']['name']
     else:
@@ -350,7 +369,7 @@ def send_shift_sync_to_erpnext(shift_type_name, sync_timestamp):
         "last_sync_of_checkin" : str(sync_timestamp)
     }
     try:
-        response = requests.request("PUT", url, headers=headers, data=json.dumps(data), timeout=REQUEST_TIMEOUT)
+        response = _erpnext_session.put(url, headers=headers, data=json.dumps(data), timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             info_logger.info("\t".join(['Shift Type last_sync_of_checkin Updated', str(shift_type_name), str(sync_timestamp.timestamp())]))
         else:
