@@ -42,6 +42,11 @@ def _default_shift_type_url():
 #     '{shift_type}' placeholder where the shift name should be substituted.
 ERPNEXT_CHECKIN_URL = getattr(config, 'ERPNEXT_CHECKIN_URL', None) or _default_checkin_url()
 ERPNEXT_SHIFT_TYPE_URL = getattr(config, 'ERPNEXT_SHIFT_TYPE_URL', None) or _default_shift_type_url()
+# (connect, read) timeout in seconds for every ERPNext HTTP call. Without this,
+# requests waits on the OS default (~20s+) on an unreachable server, and does so
+# for every single punch — turning one outage into a very long hang. Override in
+# local_config with REQUEST_TIMEOUT = (connect, read) or a single number.
+REQUEST_TIMEOUT = getattr(config, 'REQUEST_TIMEOUT', (10, 30))
 
 # possible area of further developemt
     # Real-time events - setup getting events pushed from the machine rather then polling.
@@ -291,7 +296,7 @@ def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=No
         'latitude' : latitude,
         'longitude' : longitude
     }
-    response = requests.request("POST", ERPNEXT_CHECKIN_URL, headers=headers, json=data)
+    response = requests.request("POST", ERPNEXT_CHECKIN_URL, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
     if response.status_code == 200:
         return 200, json.loads(response._content)['message']['name']
     else:
@@ -345,7 +350,7 @@ def send_shift_sync_to_erpnext(shift_type_name, sync_timestamp):
         "last_sync_of_checkin" : str(sync_timestamp)
     }
     try:
-        response = requests.request("PUT", url, headers=headers, data=json.dumps(data))
+        response = requests.request("PUT", url, headers=headers, data=json.dumps(data), timeout=REQUEST_TIMEOUT)
         if response.status_code == 200:
             info_logger.info("\t".join(['Shift Type last_sync_of_checkin Updated', str(shift_type_name), str(sync_timestamp.timestamp())]))
         else:
@@ -429,8 +434,10 @@ def _open_status(path):
     # raise on construction.
     if os.path.exists(path) and os.path.getsize(path) > 0:
         try:
-            with open(path, 'r') as f:
-                data = json.load(f)
+            with open(path, 'rb') as f:
+                # decode as utf-8-sig so a BOM (common when a file is touched on
+                # Windows) is stripped rather than mistaken for corruption.
+                data = json.loads(f.read().decode('utf-8-sig'))
             if not isinstance(data, dict):
                 raise ValueError(f'status file root is {type(data).__name__}, expected dict')
         except Exception:
