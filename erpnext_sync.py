@@ -292,6 +292,65 @@ def push_dump_to_erpnext(device_id):
     print(f"Done. Pushed dump for {device_id} and removed {dump_file}.")
 
 
+def _git_revision():
+    """Best-effort commit hash from an adjacent .git dir (empty for ZIP downloads)."""
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        head_path = os.path.join(here, '.git', 'HEAD')
+        if not os.path.exists(head_path):
+            return 'unknown (not a git checkout)'
+        with open(head_path) as f:
+            head = f.read().strip()
+        if head.startswith('ref:'):
+            ref_path = os.path.join(here, '.git', head[4:].strip())
+            if os.path.exists(ref_path):
+                with open(ref_path) as f:
+                    return f.read().strip()[:12]
+            return 'unknown (packed ref)'
+        return head[:12]
+    except Exception:
+        return 'unknown'
+
+
+def print_diagnostics():
+    """Print a shareable environment + dependency report for bug reports.
+    Contains NO API keys or secrets — safe to paste into an issue/chat."""
+    import platform
+    from importlib import metadata
+
+    def pkg(name):
+        try:
+            return metadata.version(name)
+        except Exception:
+            return 'not installed'
+
+    devices = getattr(config, 'devices', []) or []
+    has_creds = bool(getattr(config, 'ERPNEXT_API_KEY', None) and getattr(config, 'ERPNEXT_API_SECRET', None))
+    lines = [
+        'biometric-attendance-sync-tool diagnostics',
+        '  tool commit:        ' + _git_revision(),
+        '  python:             ' + platform.python_version() + '  (' + sys.executable + ')',
+        '  platform:           ' + platform.platform(),
+        '',
+        'dependencies:',
+    ]
+    for name in ('requests', 'urllib3', 'pyzk', 'pickledb', 'PyQt5'):
+        lines.append('  {:<12} {}'.format(name, pkg(name)))
+    lines += [
+        '',
+        'config (no secrets):',
+        '  ERPNEXT_URL:        ' + str(getattr(config, 'ERPNEXT_URL', None)),
+        '  api credentials:    ' + ('set' if has_creds else 'MISSING'),
+        '  devices configured: ' + str(len(devices)),
+        '  device_ids:         ' + ', '.join(str(d.get('device_id')) for d in devices),
+        '  IMPORT_START_DATE:  ' + repr(getattr(config, 'IMPORT_START_DATE', None)),
+        '  PULL_FREQUENCY:     ' + str(getattr(config, 'PULL_FREQUENCY', None)),
+        '  LOGS_DIRECTORY:     ' + str(getattr(config, 'LOGS_DIRECTORY', None)),
+        '  allowed_exceptions: ' + repr(getattr(config, 'allowed_exceptions', None)),
+    ]
+    print('\n'.join(lines))
+
+
 def send_to_erpnext(employee_field_value, timestamp, device_id=None, log_type=None, latitude=None, longitude=None):
     """
     Examples: 
@@ -488,5 +547,7 @@ if __name__ == "__main__":
         if len(sys.argv) < 3:
             raise SystemExit("usage: python erpnext_sync.py push_dump <device_id>")
         push_dump_to_erpnext(sys.argv[2])
+    elif len(sys.argv) >= 2 and sys.argv[1] in ("version", "diagnostics"):
+        print_diagnostics()
     else:
         infinite_loop()
